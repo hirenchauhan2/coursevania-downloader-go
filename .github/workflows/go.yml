@@ -32,7 +32,7 @@ jobs:
 
     - name: Build
       run: |
-        cd ./cmd
+        cd ./cmd/coursevaniadownloader
         go build -v .
     
 #     - name: Go Release Binary
