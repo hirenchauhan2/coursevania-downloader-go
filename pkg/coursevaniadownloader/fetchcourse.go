@@ -1,59 +1,44 @@
 package coursevaniadownloader
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
-	"time"
 
-	"github.com/hirenchauhan2/download-coursevania-courses/internals/utils"
+	"github.com/hirenchauhan2/coursevania-downloader-go/internals/logger"
+
+	"github.com/hirenchauhan2/coursevania-downloader-go/internals/utils"
 )
 
-var baseURL string = "https://coursevania.courses.workers.dev/"
+const baseURL = "https://coursevania.courses.workers.dev/"
 
 // DownloadCourse function is used for downloading the course that is passed
 // as argument to this function
-func DownloadCourse(courseName string) error {
+func DownloadCourse(courseName string) (bool, error) {
 	courseURL := baseURL + courseName
 
-	requestBody, errReqBody := json.Marshal(map[string]string{
-		"password": "null",
-	})
-	if errReqBody != nil {
-		log.Fatalln("There was some error while creating request body")
-	}
+	contextLogger := logger.WithFields(logger.Fields{"location": "DownloadCourse"})
+	contextLogger.Infof("Inside the DownloadCourse() for %s", courseName)
 
-	// 2o seconds of timeout for a request
-	timeout := time.Duration(20 * time.Second)
-	client := http.Client{
-		Timeout: timeout,
-	}
+	defer contextLogger.Infof("Exiting the DownloadCourse() for %s", courseName)
 
-	request, errReq := http.NewRequest("POST", courseURL, bytes.NewBuffer(requestBody))
-	if errReq != nil {
-		log.Fatalln("There was some error while creating request body")
-	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	client := http.Client{}
 
-	resp, getErr := client.Do(request)
+	resp, getErr := httpCall(&client, courseURL)
 
 	if getErr != nil {
-		log.Fatalln("There was some error fetching the course details.")
-	}
-
-	if resp.StatusCode == 404 {
-		log.Fatalln("Oops course not found. Please enter correct course name")
+		contextLogger.Errorf("There was some error fetching the course details. %s", getErr)
+		return false, getErr
 	}
 
 	defer resp.Body.Close()
 
 	respBody, readErr := ioutil.ReadAll(resp.Body)
 	if readErr != nil {
-		log.Fatalln("Unable to read the response body")
+		contextLogger.Errorf("Unable to read the response body. Error: %v", readErr)
+		return false, readErr
 	}
 
 	courseInfo := Course{}
@@ -62,169 +47,57 @@ func DownloadCourse(courseName string) error {
 	jsonErr := json.Unmarshal(respBody, &courseInfo)
 
 	if jsonErr != nil {
-		log.Fatalln("Unable to unmarshalling JSON result to course type")
+		contextLogger.Errorf("Unable to convert the JSON result to course type. %s", jsonErr)
+		return false, jsonErr
 	}
 	courseName1 := courseInfo.Name
-	fmt.Println("Course Name: ", courseName1)
+	contextLogger.Infof("Course Name: %s", courseName1)
 
 	mimeType := courseInfo.MimeType
-	// application/vnd.google-apps.folder
-	fmt.Println("Mime Type: ", mimeType)
 
 	// did we got the main course folder?
-	if utils.IsFolder(mimeType) {
-		fmt.Println("We have the Course Folder")
-
+	if utils.IsCourseFolder(mimeType) {
 		// Yes, now we need to create the folder in our system's pwd(current working directory!)
 		// with same name as course name
-		// get the current working directory
-		pwd, wdErr := os.Getwd()
-		if wdErr != nil {
-			log.Println("Could not get the working directory.", wdErr)
+		contextLogger.Infof("Creating the course directory")
+		dirCreated, dirExists := utils.CreateDirectory(courseName1)
+		if !dirCreated && !dirExists {
+			contextLogger.Errorf("Unable to create the directory: %s", courseName1)
+			return false, errors.New("Unknown error, could not find or create the directory" + courseName1)
 		}
-		fmt.Println("pwd: ", pwd)
-		chErr := os.Chdir(pwd)
-		if chErr != nil {
-			log.Fatalln("Could not change directory", chErr)
-		}
-		// TODO: create directory in the working directory
-		mkErr := os.Mkdir(courseName1, 0755)
-		if mkErr != nil {
-			log.Fatalln("Unable to create the directory", mkErr)
-		}
-		chErr = os.Chdir(courseName1)
-		if chErr != nil {
-			log.Fatalln("Could not change directory", chErr)
-		}
-		// TODO: need to call get links recursively for getting the folder and sub folder's details(Struct needs to be created)
+		contextLogger.Infof("Created the course directory")
 
+		chErr := os.Chdir(courseName1)
+		if chErr != nil {
+			contextLogger.Errorf("Could not change the directory to %s, %v", courseName1, chErr)
+		}
+
+		courseURL = courseURL + "/"
+		contextLogger.Infof("The course url: %s", courseURL)
+		downloadStatus, dlErr := DownloadFolder(&client, courseURL)
+
+		if dlErr != nil {
+			contextLogger.Errorf("There was an error while downloading the course files. %v", dlErr)
+			return false, dlErr
+		}
+
+		contextLogger.Infof("=========================================================")
+		contextLogger.Infof("Course Downloader Status")
+		contextLogger.Infof("Course Name: %s", courseName1)
+		for file, status := range downloadStatus {
+			contextLogger.Infof("File: %s, Downloaded: %v \n", file, status)
+		}
+		contextLogger.Infof("=========================================================")
+
+		return true, nil
 	}
 
-	return nil
+	return false, errors.New("Unknown error, kindly check the course name properly")
 }
 
-// GetCourseLinks will return the Course with links
-func GetCourseLinks(courseName string) ([]string, error) {
-	//baseURL := "https://coursevania.courses.workers.dev/"
-	courseURL := baseURL + courseName + "/"
-	var links []string
-
-	e := DownloadCourse(courseName)
-
-	if e != nil {
-		log.Fatalln("Course Not Found or internal server error")
+func mergeDownloadStatuses(mainStatus DownloadStatus, subFolderStatus DownloadStatus) DownloadStatus {
+	for file, status := range subFolderStatus {
+		mainStatus[file] = status
 	}
-
-	fmt.Println("Course Link:", courseURL)
-
-	timeout := time.Duration(20 * time.Second)
-	client := http.Client{
-		Timeout: timeout,
-	}
-
-	requestBody, errReqBody := json.Marshal(map[string]string{
-		"password": "null",
-	})
-
-	if errReqBody != nil {
-		log.Fatalln("There was some error while creating request body")
-	}
-
-	request, errReq := http.NewRequest("POST", courseURL, bytes.NewBuffer(requestBody))
-	if errReq != nil {
-		log.Fatalln("There was some error while creating request body")
-	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, getErr := client.Do(request)
-
-	if getErr != nil {
-		log.Fatalln("There was some error fetching the course details.")
-	}
-
-	statusCode := resp.StatusCode
-	fmt.Println(statusCode)
-
-	if statusCode >= 500 {
-		log.Fatalf("There was an internal error at server. Could not process further.")
-	}
-
-	fmt.Println(resp.Header.Get("Content-Length"))
-
-	defer resp.Body.Close()
-
-	respBody, readErr := ioutil.ReadAll(resp.Body)
-	if readErr != nil {
-		log.Fatalln("Unable to read the response body")
-	}
-
-	courseFolder := CourseFolder{}
-
-	// Convert the JSON object to CourseFolder struct
-	jsonErr := json.Unmarshal(respBody, &courseFolder)
-
-	if jsonErr != nil {
-		log.Fatalln("Unable to unmarshalling JSON result to course type")
-	}
-
-	// create list of folders with the files inside
-	folders := make(map[string]CourseFolder)
-
-	// create links for each folder and visit each folder
-	folderCount := len(courseFolder.Files)
-
-	log.Println("Folders count: ", folderCount)
-
-	for i := 0; i < folderCount; i++ {
-		link := courseURL + courseFolder.Files[i].Name
-		link1 := link + "/"
-
-		// log.Println("Visiting: ", link1)
-
-		subRequest, subReqErr := http.NewRequest("POST", link1, bytes.NewBuffer(requestBody))
-		if subReqErr != nil {
-			log.Fatalln("There was some error while creating request body")
-		}
-		subRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-		subReqResp, subReqGetErr := client.Do(subRequest)
-
-		if subReqGetErr != nil {
-			log.Fatalln("There was some error fetching the sob folder details.", subReqErr)
-		}
-
-		defer subReqResp.Body.Close()
-
-		subReqRespBody, readErr := ioutil.ReadAll(subReqResp.Body)
-		if readErr != nil {
-			log.Fatalln("Unable to read the response body")
-		}
-
-		subFolder := CourseFolder{}
-
-		// Convert the JSON object to CourseFolder struct
-		jsonErr = json.Unmarshal(subReqRespBody, &subFolder)
-
-		if jsonErr != nil {
-			log.Fatalln("Unable to unmarshalling JSON result to course type")
-		}
-
-		log.Println("Files in sub folder:", len(subFolder.Files))
-
-		folders[link] = subFolder
-	}
-
-	// fmt.Println(folders)
-
-	// Create a final list of all course files in one list
-	for folder, subFolder := range folders {
-		for _, file := range subFolder.Files {
-			fileLink := folder + "/" + file.Name
-			links = append(links, fileLink)
-		}
-	}
-
-	return links, nil
+	return mainStatus
 }
-
-// func httpCall (client *http.Client, url string)
